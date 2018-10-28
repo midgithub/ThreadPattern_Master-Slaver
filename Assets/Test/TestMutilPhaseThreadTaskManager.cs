@@ -2,10 +2,10 @@
 using System.Collections;
 using System.Collections.Generic;
 using FM.Threading;
-using RenderSection = FM.Threading.RenderSection;
+using RenderSection = FM.Threading.TestRenderSection;
 
 namespace FM.Threading {
-    public class RenderSection {
+    public class TestRenderSection {
         public volatile Task currentTask;
         public long lastRebuildTicks;//用于标记当前的更新是否是最新的更新
         public int DistanceToPlayer { get { return Mathf.FloorToInt(Vector3.Distance(Vector3.zero, position) * 2); } }
@@ -18,8 +18,8 @@ namespace FM.Threading {
         protected override int CompareFunc(Task _other) {
             if (_other.currentParseIdx != this.currentParseIdx)
                 return _other.currentParseIdx - this.currentParseIdx;
-            var _osection = _other.param as RenderSection;
-            var _tsection = param as RenderSection;
+            var _osection = _other.param as TestRenderSection;
+            var _tsection = param as TestRenderSection;
             return _tsection.DistanceToPlayer - _osection.DistanceToPlayer;
         }
     }
@@ -48,7 +48,7 @@ namespace FM.Threading {
             }
             var go = GameObject.CreatePrimitive(PrimitiveType.Cube);
             go.transform.parent = parent;
-            go.transform.position = (_task.param as RenderSection).position;
+            go.transform.position = (_task.param as TestRenderSection).position;
             go.transform.localScale = new Vector3(1, 1, 1);
 #if TEST_MAIN_THRED_BUG
             if (_task.is_deal_in_main_thread)
@@ -57,7 +57,7 @@ namespace FM.Threading {
             }
 #endif
         }
-        public void CommitRebuildSectionTask(RenderSection _section) {
+        public void CommitRebuildSectionTask(TestRenderSection _section) {
             Debug.Assert(IsInMainThread);
             if (_section.currentTask != null) {
                 _section.currentTask.IsInterrupted = true;
@@ -67,11 +67,11 @@ namespace FM.Threading {
             _section.currentTask = _task;
             _section.lastRebuildTicks = _task.createTicks;
             _task.OnFinishedEvent += (_tk) => {
-                if (_tk.exception != null) {
-                    Debug.LogException(_tk.exception);
+                if (_tk.Exception != null) {
+                    Debug.LogException(_tk.Exception);
                     return;
                 }
-                var _sec = _tk.param as RenderSection;
+                var _sec = _tk.param as TestRenderSection;
                 if (_tk.createTicks < _sec.lastRebuildTicks) {
                     Debug.LogError("Not the newest task");
                     return;
@@ -87,10 +87,10 @@ namespace FM.Threading {
                 Debug.LogError("OnInterrupt deal num= " + _tk.dealNum + " IsFinied = " + _tk.IsFinished);
                 System.Threading.Thread.Sleep(2);
             };
-            mutilThreadsTaskQueue.Enqueue(_task);
+            AnyThreadTasks.Enqueue(_task);
         }
 
-        private Task CreateCollideTask(RenderSection _section) {
+        private Task CreateCollideTask(TestRenderSection _section) {
             var _task = new RenderTask();
             var _tick = GetCurrentTicks();
             _task.createTicks = _tick;
@@ -105,8 +105,6 @@ namespace FM.Threading {
                 var ms = System.DateTime.Now.Subtract(d1).TotalMilliseconds;
                 if (ms > _run_ms) {
                     break;
-                }
-                for (int i = 0; i < 1; i++) {
                 }
                 System.Threading.Thread.Sleep(1);
             }
@@ -138,10 +136,10 @@ public class TestMutilPhaseThreadTaskManager : UnityEngine.MonoBehaviour {
             renderTaskMgr.Update(maxUpdateTimeMs);
         }
         lastUpdateTime = (int)((Time.realtimeSinceStartup - _t) * 1000);
-        processingTaskCount = renderTaskMgr.GetProcessingTaskCount();
+        processingTaskCount = renderTaskMgr.GetAnyThreadTaskCount();
         secondPassTaskCount = renderTaskMgr.GetSecondPassTaskCount();
-        finishedTaskCount = renderTaskMgr.GetFinishedTaskCount();
-        interruptedTaskCount = renderTaskMgr.GetInterruptTaskCount();
+        finishedTaskCount = renderTaskMgr.GetMainThreadTaskCount();
+        interruptedTaskCount = renderTaskMgr.GetCurFrameTaskCount();
     }
     bool isDestroyed = false;
     public void OnDestroy() {
