@@ -42,7 +42,7 @@ namespace FM.Threading {
                 }
             }
         }
-        public bool IsClosing { get; set; }
+        public bool IsClosing { get; private set; }
 
         public void Close() {
             lock (queue) {

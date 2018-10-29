@@ -18,6 +18,7 @@ namespace FM.Threading {
         bool IsEmpty { get; }
         int Count { get; }
         bool IsClosing { get; set; }
+        bool Close();
     }
 }
 

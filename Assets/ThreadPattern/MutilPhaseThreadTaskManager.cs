@@ -96,6 +96,17 @@ namespace FM.Threading {
             }
         }
         /// <summary>
+        /// 第一次希望被投递的队列类型
+        /// </summary>
+        /// <returns></returns>
+        public virtual ETaskRuningContextType GetInitThreadContentType() {
+            if (IsMustRunInCurFrame) {
+                return ETaskRuningContextType.MustRunInMainThreadAndInCurFrame;
+            } else {
+                return ETaskRuningContextType.RunInAnyThread;
+            }
+        }
+        /// <summary>
         /// 任务被中断 回调，视情况是否需要重新提交任务
         /// </summary>
         public virtual void OnInterrupted() {
@@ -130,14 +141,23 @@ namespace FM.Threading {
         /// reset thread local storage
         /// </summary>
         public virtual void ResetThreadLoacalStorage() { }
-        public void NotifyToStop() { IsStop = true; }
         public bool IsFinisedRun = false;
-        public bool IsStop = false;
         public void Run() {
-            master.DealQueue(master.AnyThreadTasks, this, null, true);
+            try {
+                master.DealQueue(master.AnyThreadTasks, this, null, false);
+            } catch (System.Threading.ThreadInterruptedException) {
+                //正常结束
+                IsFinisedRun = true;
+                Debug.Log("Interrupt Stop");
+                return;
+            }
             IsFinisedRun = true;
             Debug.Log("Auto Stop");
         }
+
+    }
+
+    public interface IThreadManager {
 
     }
     /// <summary>
@@ -167,22 +187,12 @@ namespace FM.Threading {
         public IBlockQueue<Task> AnyThreadTasks;//多线程队列 所有的这些任务可能在任何线程中执行
 
         protected ThreadWorker mainThreadWorker;//主线程自己的局部环境
-        const int MAX_ENQUEUE_WAIT_TIME_MS = 3000;//最大等待时间
-        Thread mainThread;//出线程
-        public MutilPhaseThreadTaskManager(int _maxTaskCount) {
-            this.MaxTaskCount = _maxTaskCount;
-            mainThread = Thread.CurrentThread;
-            AnyThreadTasks = CreateBlockQueue(MaxTaskCount * 1);
-            MainThreadTasks = CreateBlockQueue(MaxTaskCount * 2);
-            CurFrameTasks = CreateBlockQueue(MaxTaskCount * 10);
-        }
+        private const int MAX_ENQUEUE_WAIT_TIME_MS = 3000;//最大等待时间
+        private Thread mainThread;//出线程
         protected virtual IBlockQueue<Task> CreateBlockQueue(int count) {
             return new BlockingQueue<Task>(new PriorityQueue<Task>(), count);
         }
-        //设置初始时间戳
-        protected virtual void SetTimer(long _maxRunTimeMs) { }
-        //是否超时
-        protected virtual bool IsTimeOut() { return false; }
+
         //同时最大任务数量
         protected int MaxTaskCount { get; private set; }
         public bool IsNeedToStop = false;
@@ -190,27 +200,252 @@ namespace FM.Threading {
         public int GetMainThreadTaskCount() { return MainThreadTasks.Count; }
         public int GetAnyThreadTaskCount() { return AnyThreadTasks.Count; }
 
-        //获取当前的时间戳
-        protected long GetCurrentTicks() { return System.DateTime.Now.Ticks; }
-        //处理最后一阶段任务
-        protected virtual void DealTask(Task _task) { }
-        public virtual void Start() { }
-        public virtual void OnDestroy() { CleanTodoThreadingTasks(); }
 
+        /// <summary>
+        /// 等待派发的任务
+        /// </summary>
+        List<Task> waitDispatchTasks = new List<Task>();
+        HashSet<Task> waitDispatchTaskSet = new HashSet<Task>();
+
+        protected List<ThreadWorker> threadWorkers;
+        protected List<Thread> threads;
+        /// <summary>
+        /// 最大等待其他线程自动结束时间
+        /// </summary>
+        public int MaxWaitOtherThreadStopTimeMs = 12;
+
+        protected System.Func<MutilPhaseThreadTaskManager, int, ThreadWorker> WorkCreateFunc;
+
+        #region 每帧运行时间控制
+        /// <summary>
+        /// 每帧最多可以运行的毫秒数，用于控制帧率 (单位毫秒)
+        /// </summary>
+        public int MaxRunTimePreFrameInMs = 10;
+        //获取当前的时间戳
+        public float realtimeSinceStartupInMs { get { return (DateTime.Now.Ticks / 10000.0f); } }
+
+        public int TargetFrameDeltaTime = 33;//目标每帧跑多少毫秒
+        protected float curFrameDeadline;//当前帧截至时间
+        protected float lastFrameExcendTimeInMs;//上一帧超时时间
+        //是否超时
+        protected bool IsTimeOut() { return realtimeSinceStartupInMs > curFrameDeadline; }
+
+        #endregion
+
+        /// <summary>
+        /// 当前是否是运行在主线程中
+        /// </summary>
+        protected bool IsInMainThread { get { return System.Threading.Thread.CurrentThread == mainThread; } }
+
+        bool isInited = false;
         //主线程中的更新
-        public void Update(long _maxRunTimeMs) {
-            SetTimer(_maxRunTimeMs);
+        public void OnUpdate(long _deltaTimeMs) {
+            if (!isInited)
+                return;
+            var _timePenaltyRate = Mathf.Min(1.0f, 1.0f * TargetFrameDeltaTime / _deltaTimeMs);//计算上一帧超时后的罚时，为了帧率更加的平衡
+            curFrameDeadline = realtimeSinceStartupInMs + Mathf.Max((int)(MaxRunTimePreFrameInMs * _timePenaltyRate - lastFrameExcendTimeInMs), 0);
+
             //处理必须在这帧完成的事件的回调
             DispatchWaitEnqueueTasks(AnyThreadTasks);//将等待队列中的可以在其他线程中运行的任务派发给其他的线程中
-            DealQueue(CurFrameTasks, mainThreadWorker, null);//处理本帧必须完成的任务，无时间限制
-            DealQueue(MainThreadTasks, mainThreadWorker, IsTimeOut);//处理必须在主线程中完成的任务，有时间限制
+            DealQueue(CurFrameTasks, mainThreadWorker, null, true);//处理本帧必须完成的任务，无时间限制
+            DealQueue(MainThreadTasks, mainThreadWorker, IsTimeOut, true);//处理必须在主线程中完成的任务，有时间限制
 
+            lastFrameExcendTimeInMs = realtimeSinceStartupInMs - curFrameDeadline;
         }
 
-        public void DealQueue(IBlockQueue<Task> _todoQueue, ThreadWorker _thread_worker, Func<bool> _FuncIsTimeOut, bool _isBlocking = false) {
+        public void Start(
+            int _threadCount
+            , int _maxTaskCount
+            , System.Func<MutilPhaseThreadTaskManager, int, ThreadWorker> _WorkCreateFunc
+            , int _MaxRunTimePreFrameInMs = 10
+            ) {
+            if (isInited) {
+                Debug.LogError("重复初始化：逻辑错误");
+                return;
+            }
+            isInited = true;
+            mainThread = Thread.CurrentThread;
+            threadWorkers = new List<ThreadWorker>();
+            threads = new List<Thread>();
+
+            MaxRunTimePreFrameInMs = _MaxRunTimePreFrameInMs;
+            MaxTaskCount = _maxTaskCount;
+            AnyThreadTasks = CreateBlockQueue(MaxTaskCount * 1);
+            MainThreadTasks = CreateBlockQueue(MaxTaskCount * 2);
+            CurFrameTasks = CreateBlockQueue(MaxTaskCount * 10);
+            WorkCreateFunc = _WorkCreateFunc;
+            mainThreadWorker = _WorkCreateFunc(this, -1);
+            for (int _i = 0; _i < _threadCount; ++_i) {
+                //每个线程都分配避免互相之间锁 而挂起
+                var _worker = WorkCreateFunc(this, _i);
+                Thread _thread = new Thread(_worker.Run);
+                _thread.IsBackground = true;
+                threadWorkers.Add(_worker);
+                threads.Add(_thread);
+            }
+            foreach (var _thread in threads) {
+                _thread.Start();
+            }
+        }
+
+        public void OnDestroy() {
+            isInited = false;
+            //知被阻塞的线程 需要停止
+            IsNeedToStop = true;
+            //唤醒正在等待的所有线程
+            MainThreadTasks.Close();
+            AnyThreadTasks.Close();
+            CurFrameTasks.Close();
+
+            for (int _i = 0; _i < threads.Count; ++_i) {
+                try {
+                    threads[_i].Interrupt();//以中断的形式通知线程结束
+                } catch (System.Threading.ThreadInterruptedException) {
+                    Debug.LogWarning("Interrupted whilst waiting for worker to die");
+                }
+            }
+            //等待线程主动结束
+            var _initTime = DateTime.Now;
+            while (true) {
+                bool _isFinishedAll = true;
+                for (int _i = 0; _i < threadWorkers.Count; ++_i) {
+                    if (!threadWorkers[_i].IsFinisedRun) {
+                        _isFinishedAll = false;
+                    }
+                }
+                if (_isFinishedAll) {
+                    break;
+                }
+                Thread.Sleep(1);
+                if ((_initTime - DateTime.Now).TotalMilliseconds > MaxWaitOtherThreadStopTimeMs) {
+                    break;
+                }
+            }
+
+            //强制结束
+            for (int _i = 0; _i < threadWorkers.Count; ++_i) {
+                if (!threadWorkers[_i].IsFinisedRun) {
+                    threads[_i].Abort();
+                }
+            }
+            threads.Clear();
+
+            //清理未完成的所有任务
+            Action<IBlockQueue<Task>> _FuncClearQueue = (_queue) => {
+                while (!_queue.IsEmpty) {
+                    Task _task = null;
+                    _queue.TryDequeue(out _task);
+                    if (_task != null && _task.OnInterruptEvent != null) {
+                        _task.OnInterruptEvent(_task);
+                    }
+                }
+            };
+            _FuncClearQueue(CurFrameTasks);
+            _FuncClearQueue(MainThreadTasks);
+            _FuncClearQueue(AnyThreadTasks);
+
+            Debug.Log("ThreadManager Finish Clear");
+        }
+
+        /// <summary>
+        /// 中断任务
+        /// </summary>
+        /// <param name="_task"></param>
+        public void InterruptTask(Task _task) {
+            if (!IsInMainThread) {
+                Debug.LogError("任务的添加：中断任务必须在主线程中进行");
+                return;
+            }
+            _task.IsInterrupted = true;
+        }
+        /// <summary>
+        /// 是否可以提交任务
+        /// </summary>
+        /// <returns></returns>
+        public virtual bool CanCommitTask() {
+            return waitDispatchTasks.Count < MaxTaskCount * 3;
+        }
+
+        //可能在任何线程回调
+        protected void DealTask(Task _task) {
+#if DEBUG_THREAD_PHASE_ID
+            _task.workedThreadIds.Add(System.Threading.Thread.CurrentThread.ManagedThreadId);
+#endif
+            OnDealTask(_task);
+        }
+
+        protected virtual void OnDealTask(Task _task) {
+
+        }        /// <summary>
+        /// 添加的任务
+        /// </summary>
+        /// <param name="_task"></param>
+        public void AddTask(Task _task) {
+            if (!IsInMainThread) {
+                Debug.LogError("任务的添加：必须在主线程");
+                return;
+            }
+            if (waitDispatchTaskSet.Add(_task)) {
+                waitDispatchTasks.Add(_task);
+            } else {
+                Debug.LogError("逻辑错误：添加重复的任务 " + _task.ToString());
+            }
+        }
+
+
+
+        #region Help Func
+        IBlockQueue<Task> GetQueueFromType(ETaskRuningContextType _queueType) {
+            IBlockQueue<Task> _nextQueue = null;
+            switch (_queueType) {
+                case ETaskRuningContextType.MustRunInMainThreadAndInCurFrame:
+                    _nextQueue = CurFrameTasks;
+                    break;
+                case ETaskRuningContextType.MustRunInMainThread:
+                    _nextQueue = MainThreadTasks;
+                    break;
+                case ETaskRuningContextType.RunInAnyThread:
+                    _nextQueue = AnyThreadTasks;
+                    break;
+                default:
+                    break;
+            }
+            return _nextQueue;
+        }
+        void DispatchWaitDispatchTasks() {
+            var _count = waitDispatchTasks.Count;
+            for (int i = 0; i < _count; i++) {
+                var _info = waitDispatchTasks[i];
+                var _targetQueue = GetQueueFromType(_info.GetInitThreadContentType());
+                if (_targetQueue.TryEnqueue(_info)) {
+                    waitEnqueueTasks.RemoveAt(i);
+                    --i;
+                    --_count;
+                }
+            }
+        }
+
+        void DispatchWaitEnqueueTasks(IBlockQueue<Task> _targetQueue) {
+            var _count = waitEnqueueTasks.Count;
+            for (int i = 0; i < _count; i++) {
+                var _info = waitEnqueueTasks[i];
+                if (_info.targetQueue == _targetQueue) {
+                    //注意必须在主线程执行的队列  一定可以装进去
+                    if (_targetQueue.TryEnqueue(_info.task)) {
+                        waitEnqueueTasks.RemoveAt(i);
+                        --i;
+                        --_count;
+                    } else {
+                        break;
+                    }
+                }
+            }
+        }
+
+        public void DealQueue(IBlockQueue<Task> _todoQueue, ThreadWorker _thread_worker, Func<bool> _FuncIsTimeOut, bool _isInMainThread = true) {
             while (IsNeedToStop) {
                 Task _task = null;
-                if (_isBlocking) {
+                if (_isInMainThread) {
                     _task = _todoQueue.Dequeue();
                 } else {
                     if (!_todoQueue.TryDequeue(out _task)) {
@@ -228,24 +463,11 @@ namespace FM.Threading {
                         if (_task.MoveNextPhase()) {
                             //根据当前任务的状态派发到不同的队列中
                             var _queueType = _task.CurParseThradContextType();
-                            IBlockQueue<Task> _nextQueue = null;
-                            switch (_queueType) {
-                                case ETaskRuningContextType.MustRunInMainThreadAndInCurFrame:
-                                    _nextQueue = CurFrameTasks;
-                                    break;
-                                case ETaskRuningContextType.MustRunInMainThread:
-                                    _nextQueue = MainThreadTasks;
-                                    break;
-                                case ETaskRuningContextType.RunInAnyThread:
-                                    _nextQueue = AnyThreadTasks;
-                                    break;
-                                default:
-                                    break;
-                            }
-                            if (!_isBlocking) {
+                            var _nextQueue = GetQueueFromType(_queueType);
+                            if (!_isInMainThread) {
                                 //为了防止阻塞
                                 if (!_nextQueue.TryEnqueue(_task)) {
-                                    EnqueuPendingTask(_nextQueue, _task);
+                                    AddWaitEnqueueTask(_nextQueue, _task);
                                 }
                             } else {
                                 _nextQueue.Enqueue(_task);
@@ -254,15 +476,24 @@ namespace FM.Threading {
                     } catch (System.Threading.ThreadInterruptedException) {
                         //正常现象
                         _task.IsInterrupted = true;
-                        NoBlockingEnqueue(_task);
+                        if (_isInMainThread) {
+                            NoBlockingEnqueue(_task);
+                        } else {
+                            BlockingEnqueue(MainThreadTasks, _task);
+                        }
                     } catch (System.Exception _e) {
                         _task.Exception = _e;
-                        NoBlockingEnqueue(_task);
+                        if (_isInMainThread) {
+                            NoBlockingEnqueue(_task);
+                        } else {
+                            BlockingEnqueue(MainThreadTasks, _task);
+                        }
                     }
                     if (_FuncIsTimeOut != null && _FuncIsTimeOut()) {
                         break;
                     }
                 } else {
+                    Debug.Assert(_isInMainThread, "LogicError: Callback Must in mainThread");
                     //处理已经完成了的任务，进行回调
                     try {
                         if (_task.IsInterrupted) {
@@ -281,41 +512,7 @@ namespace FM.Threading {
             }
         }
 
-        void DispatchWaitEnqueueTasks(IBlockQueue<Task> _targetQueue) {
-            var _count = waitEnqueueTasks.Count;
-            for (int i = 0; i < _count; i++) {
-                var _info = waitEnqueueTasks[i];
-                if (_info.targetQueue == _targetQueue) {
-                    if (_targetQueue.TryEnqueue(_info.task)) {
-                        waitEnqueueTasks.RemoveAt(i);
-                        --i;
-                        --_count;
-                    } else {
-                        break;
-                    }
-                }
-            }
-        }
-
-
-        public void NoBlockingEnqueue(Task _task) {
-            if (_task.IsMustRunInCurFrame) {
-                NoBlockingEnqueue(CurFrameTasks, _task);
-            } else {
-                NoBlockingEnqueue(MainThreadTasks, _task);
-            }
-        }
-
-        public void NoBlockingEnqueue(IBlockQueue<Task> _queue, Task _task) {
-            if (!_queue.TryEnqueue(_task)) {
-                EnqueuPendingTask(_queue, _task);
-            };
-        }
-        public void BlockingEnqueue(IBlockQueue<Task> _queue, Task _task) {
-            _queue.Enqueue(_task);
-        }
-
-        public void EnqueuPendingTask(IBlockQueue<Task> _queue, Task _task) {
+        public void AddWaitEnqueueTask(IBlockQueue<Task> _queue, Task _task) {
             waitEnqueueTasks.Add(new PendingEnqueueTasks(_queue, _task));
         }
         bool TryDequeueWaitEqueueTasks(IBlockQueue<Task> _targetQueue, out Task _task) {
@@ -332,45 +529,25 @@ namespace FM.Threading {
             return false;
         }
 
-        protected void CleanTodoThreadingTasks() {
-            while (!AnyThreadTasks.IsEmpty) {
-                Task _task = null;
-                AnyThreadTasks.TryDequeue(out _task);
-                if (_task != null && _task.OnInterruptEvent != null) {
-                    _task.OnInterruptEvent(_task);
-                }
-            }
-        }
 
-        List<Task> todoTasks = new List<Task>();
-        HashSet<Task> todoTaskSet = new HashSet<Task>();
-
-        /// <summary>
-        /// 添加的任务
-        /// </summary>
-        /// <param name="_task"></param>
-        public void AddTask(Task _task) {
-            if (Thread.CurrentThread != mainThread) {
-                Debug.LogError("任务的添加：必须在主线程");
-                return;
-            }
-            if (todoTaskSet.Add(_task)) {
-                todoTasks.Add(_task);
+        public void NoBlockingEnqueue(Task _task) {
+            if (_task.IsMustRunInCurFrame) {
+                NoBlockingEnqueue(CurFrameTasks, _task);
             } else {
-                Debug.LogError("逻辑错误：添加重复的任务 " + _task.ToString());
+                NoBlockingEnqueue(MainThreadTasks, _task);
             }
         }
-        /// <summary>
-        /// 中断任务
-        /// </summary>
-        /// <param name="_task"></param>
-        public void InterruptTask(Task _task) {
-            if (Thread.CurrentThread != mainThread) {
-                Debug.LogError("任务的添加：中断任务必须在主线程中进行");
-                return;
-            }
-            _task.IsInterrupted = true;
+
+        public void NoBlockingEnqueue(IBlockQueue<Task> _queue, Task _task) {
+            if (!_queue.TryEnqueue(_task)) {
+                AddWaitEnqueueTask(_queue, _task);
+            };
         }
+        public void BlockingEnqueue(IBlockQueue<Task> _queue, Task _task) {
+            _queue.Enqueue(_task);
+        }
+
+        #endregion
 
     }
 

@@ -25,9 +25,7 @@ namespace FM.Threading {
     }
 
     public class TestMasterSlaveThreadManager : MasterSlaveThreadManager {
-        public TestMasterSlaveThreadManager(int _threadCount, int _maxTaskCount, System.Func<MasterSlaveThreadManager, int, ThreadWorker> _WorkCreateFunc, bool _alsoRunInMainThread = false) :
-            base(_threadCount, _maxTaskCount, _WorkCreateFunc, _alsoRunInMainThread) { }
-
+       
         //每帧的初始化时间
         protected float frameDeadlineS;
         protected override void SetTimer(long _maxRunTimeMs) { frameDeadlineS = Time.realtimeSinceStartup + _maxRunTimeMs * 0.001f; }
@@ -92,7 +90,7 @@ namespace FM.Threading {
 
         private Task CreateCollideTask(TestRenderSection _section) {
             var _task = new RenderTask();
-            var _tick = GetCurrentTicks();
+            var _tick = System.DateTime.Now.Ticks;
             _task.createTicks = _tick;
             _task.param = _section;
             return _task;
@@ -112,34 +110,32 @@ namespace FM.Threading {
     }
 }
 public class TestMutilPhaseThreadTaskManager : UnityEngine.MonoBehaviour {
-    TestMasterSlaveThreadManager renderTaskMgr;
+    TestMasterSlaveThreadManager renderTaskMgr = new TestMasterSlaveThreadManager();
     public float deltaTime = 0;
     public bool isAlsoRunInMainThread;
     public int maxUpdateTimeMs = 20;
     Coroutine currentCour;
     public void Start() {
         Debug.LogError("Start");
-        renderTaskMgr = new TestMasterSlaveThreadManager(4, 10, (_master, _idx) => { return new ThreadWorker(_master); }, isAlsoRunInMainThread);
-        renderTaskMgr.Start();
+        renderTaskMgr.Start(4, 10, (_master, _idx) => { return new ThreadWorker(renderTaskMgr); });
         currentCour = StartCoroutine(CreateCubePos());
     }
-    public int processingTaskCount = 0;
+    public int AnyThread = 0;
     public int secondPassTaskCount = 0;
-    public int finishedTaskCount = 0;
-    public int interruptedTaskCount = 0;
+    public int MainThreadTaskCount = 0;
+    public int CurFrameTaskCount = 0;
 
     public int lastUpdateTime = 0;
     public void Update() {
         deltaTime = Time.deltaTime;
         var _t = Time.realtimeSinceStartup;
         if (!isDestroyed) {
-            renderTaskMgr.Update(maxUpdateTimeMs);
+            renderTaskMgr.OnUpdate((int)(deltaTime * 1000));
         }
         lastUpdateTime = (int)((Time.realtimeSinceStartup - _t) * 1000);
-        processingTaskCount = renderTaskMgr.GetAnyThreadTaskCount();
-        secondPassTaskCount = renderTaskMgr.GetSecondPassTaskCount();
-        finishedTaskCount = renderTaskMgr.GetMainThreadTaskCount();
-        interruptedTaskCount = renderTaskMgr.GetCurFrameTaskCount();
+        AnyThread = renderTaskMgr.GetAnyThreadTaskCount();
+        MainThreadTaskCount = renderTaskMgr.GetMainThreadTaskCount();
+        CurFrameTaskCount = renderTaskMgr.GetCurFrameTaskCount();
     }
     bool isDestroyed = false;
     public void OnDestroy() {
