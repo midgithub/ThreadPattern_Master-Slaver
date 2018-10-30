@@ -126,7 +126,7 @@ namespace FM.Threading {
                     return false;
                 }
                 queue.Enqueue(_item);
-                if (queue.Count == 1) {
+                if (queue.Count > 1) {
                     // wake up any blocked dequeue
                     Monitor.PulseAll(queue);
                 }
@@ -147,7 +147,7 @@ namespace FM.Threading {
                     return false;
                 }
                 queue.Enqueue(_item);
-                if (queue.Count == 1) {
+                if (queue.Count > 1) {
                     // wake up any blocked dequeue
                     Monitor.PulseAll(queue);
                 }

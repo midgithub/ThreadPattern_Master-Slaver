@@ -17,8 +17,8 @@ namespace FM.Threading {
         void Enqueue(T _ret);
         bool IsEmpty { get; }
         int Count { get; }
-        bool IsClosing { get; set; }
-        bool Close();
+        bool IsClosing { get; }
+        void Close();
     }
 }
 
