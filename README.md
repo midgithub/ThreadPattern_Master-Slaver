@@ -51,8 +51,29 @@ MasterSlaveThreadManager：
 }
 ```
 
+重载函数 GetTargetQueueType 用于指定任务在不同阶段在哪种线程环境中执行
+```c
+public override EThreadContext GetTargetQueueType() {
+    if (IsMustRunInCurFrame) {
+        return EThreadContext.MainThreadAndInCurFrame;
+    } else {
+        var _curTaskPhase = (ETestTaskPhase)currentParseIdx;
+        switch (_curTaskPhase) {
+            case ETestTaskPhase.FirstAny:
+                return EThreadContext.AnyThread;
+            case ETestTaskPhase.SecondMain:
+                return EThreadContext.MainThread;
+            case ETestTaskPhase.Finished:
+                return EThreadContext.MainThread;
+            default:
+                Debug.LogError("Should not call again");
+                return EThreadContext.MainThread;
+        }
+    }
+}
+```
 //建议 
 使用：Thread local storage 请 继承ThreadWorker后添加相应的成员 并重写ResetThreadLoacalStorage
 使用：Task local storage 请继承Task后添加相应的成员
 
-具体使用方式可以参考：TestThreadPatternMasterSlave
+具体使用方式可以参考：TestThreadPatternMasterSlave.cs
