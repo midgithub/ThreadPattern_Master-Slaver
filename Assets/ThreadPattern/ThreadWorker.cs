@@ -14,9 +14,6 @@ namespace FM.Threading {
         public virtual void ResetThreadLoacalStorage() { }
         public bool IsFinisedRun = false;
         public void Run() {
-            while (!master.IsStarted) {
-                System.Threading.Thread.Sleep(3);
-            }
             try {
                 master.DealQueue(master.AnyThreadTasks, this, null, false);
             } catch (System.Threading.ThreadInterruptedException) {

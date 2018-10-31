@@ -171,7 +171,7 @@ namespace FM.Threading {
         /// </summary>
         public int MaxRunTimePreFrameInMs = 10;
         //获取当前的时间戳
-        public float realtimeSinceStartupInMs { get { return (DateTime.Now.Ticks / 10000.0f); } }
+        public float realtimeSinceStartupInMs { get { return Time.realtimeSinceStartup * 1000; } }
 
         public int TargetFrameDeltaTime = 33;//目标每帧跑多少毫秒
         protected float curFrameDeadline;//当前帧截至时间
@@ -191,18 +191,31 @@ namespace FM.Threading {
         public bool IsInMainThread { get { return System.Threading.Thread.CurrentThread == mainThread; } }
 
         private bool isInited = false;
+        public int CurFrameMaxRunMs;
+
+        void BeginSample(string _msg) { if (!IsInMainThread) return; UnityEngine.Profiling.Profiler.BeginSample(_msg); }
+        void EndSample() { if (!IsInMainThread) return; UnityEngine.Profiling.Profiler.EndSample(); }
         //主线程中的更新
         public void DoUpdate(long _deltaTimeMs) {
             if (!isInited)
                 return;
             var _timePenaltyRate = Mathf.Min(1.0f, 1.0f * TargetFrameDeltaTime / _deltaTimeMs);//计算上一帧超时后的罚时，为了帧率更加的平衡
-            curFrameDeadline = realtimeSinceStartupInMs + Mathf.Max((int)(MaxRunTimePreFrameInMs * _timePenaltyRate - lastFrameExcendTimeInMs), 0);
+            CurFrameMaxRunMs = Mathf.Max((int)(MaxRunTimePreFrameInMs * _timePenaltyRate - lastFrameExcendTimeInMs), 0);
+            curFrameDeadline = realtimeSinceStartupInMs + CurFrameMaxRunMs;
             //这一帧新提交的任务 需要进入队列
+            BeginSample("DispatchWaitDispatchTasks");
             DispatchWaitDispatchTasks();
+            EndSample();
             //处理必须在这帧完成的事件的回调
+            BeginSample("DispatchWaitEnqueueTasks");
             DispatchWaitEnqueueTasks(AnyThreadTasks);//将等待队列中的可以在其他线程中运行的任务派发给其他的线程中
+            EndSample();
+            BeginSample("DealQueue CurFrameTasks");
             DealQueue(CurFrameTasks, mainThreadWorker, null, true);//处理本帧必须完成的任务，无时间限制
+            EndSample();
+            BeginSample("DealQueue MainThreadTasks");
             DealQueue(MainThreadTasks, mainThreadWorker, IsTimeOut, true);//处理必须在主线程中完成的任务，有时间限制
+            EndSample();
 
             lastFrameExcendTimeInMs = realtimeSinceStartupInMs - curFrameDeadline;
         }
@@ -240,9 +253,8 @@ namespace FM.Threading {
             for (int _i = 0; _i < _threadCount; _i++) {
                 threads[_i].Start();
             }
-            IsStarted = true;
         }
-        public bool IsStarted = false; 
+        public bool IsStarted = false;
         public void DoDestroy() {
             isInited = false;
             //知被阻塞的线程 需要停止
@@ -260,7 +272,7 @@ namespace FM.Threading {
                 }
             }
             //等待线程主动结束
-            var _initTime = DateTime.Now;
+            var _initTime = Time.realtimeSinceStartup;
             while (true) {
                 bool _isFinishedAll = true;
                 for (int _i = 0; _i < threadWorkers.Count; ++_i) {
@@ -272,7 +284,7 @@ namespace FM.Threading {
                     break;
                 }
                 Thread.Sleep(1);
-                if ((_initTime - DateTime.Now).TotalMilliseconds > MaxWaitOtherThreadStopTimeMs) {
+                if ((Time.realtimeSinceStartup - _initTime) > MaxWaitOtherThreadStopTimeMs * 0.001f) {
                     break;
                 }
             }
@@ -418,8 +430,16 @@ namespace FM.Threading {
                     _task = _todoQueue.Dequeue();
                 } else {
                     if (!_todoQueue.TryDequeue(out _task)) {
-                        if (!TryDequeueWaitEqueueTasks(_todoQueue, out _task)) {
-                            return;
+                        if (_todoQueue == CurFrameTasks) {
+                            if (!TryDequeueWaitEqueueTasks(_todoQueue, out _task)) {
+                                return;
+                            }
+                        } else {
+                            if (_FuncIsTimeOut())
+                                return;
+                            if (!TryDequeueWaitEqueueTasks(_todoQueue, out _task)) {
+                                return;
+                            }
                         }
                     }
                 }
@@ -429,18 +449,17 @@ namespace FM.Threading {
                     //处理还未完成的任务
                     try {
                         DealTask(_task);
-                        if (_task.MoveNextPhase()) {
-                            //根据当前任务的状态派发到不同的队列中
-                            var _queueType = _task.GetCurParseThradContextType();
-                            var _nextQueue = GetQueueFromType(_queueType);
-                            if (_isInMainThread) {
-                                //为了防止阻塞
-                                if (!_nextQueue.TryEnqueue(_task)) {
-                                    AddWaitEnqueueTask(_nextQueue, _task);
-                                }
-                            } else {
-                                _nextQueue.Enqueue(_task);
+                        _task.MoveNextPhase();
+                        //根据当前任务的状态派发到不同的队列中
+                        var _queueType = _task.GetTargetQueueType();
+                        var _nextQueue = GetQueueFromType(_queueType);
+                        if (_isInMainThread) {
+                            //为了防止阻塞
+                            if (!_nextQueue.TryEnqueue(_task)) {
+                                AddWaitEnqueueTask(_nextQueue, _task);
                             }
+                        } else {
+                            _nextQueue.Enqueue(_task);
                         }
                     } catch (System.Threading.ThreadInterruptedException) {
                         //正常现象

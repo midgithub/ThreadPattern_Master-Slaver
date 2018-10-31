@@ -15,7 +15,7 @@ namespace FM.Threading {
 
     public class RenderTask : Task {
         public RenderTask(System.Object param) : base(param) { }
-        protected override int MaxPhaseNum() { return 2; }
+        protected override int MaxPhaseNum { get { return 2; } }
         protected override int CompareFunc(Task _other) {
             if (_other.currentParseIdx != this.currentParseIdx)
                 return _other.currentParseIdx - this.currentParseIdx;
@@ -23,8 +23,31 @@ namespace FM.Threading {
             var _tsection = Param as TestRenderSection;
             return _tsection.DistanceToPlayer - _osection.DistanceToPlayer;
         }
+        public override EThreadContext GetTargetQueueType() {
+            if (IsMustRunInCurFrame) {
+                return EThreadContext.MainThreadAndInCurFrame;
+            } else {
+                var _curTaskPhase = (ETestTaskPhase)currentParseIdx;
+                switch (_curTaskPhase) {
+                    case ETestTaskPhase.FirstAny:
+                        return EThreadContext.AnyThread;
+                    case ETestTaskPhase.SecondMain:
+                        return EThreadContext.MainThread;
+                    case ETestTaskPhase.Finished:
+                        return EThreadContext.MainThread;
+                    default:
+                        Debug.LogError("Should not call again");
+                        return EThreadContext.MainThread;
+                }
+            }
+        }
     }
 
+}
+public enum ETestTaskPhase {
+    FirstAny,
+    SecondMain,
+    Finished,
 }
 public class TestThreadPatternMasterSlave : UnityEngine.MonoBehaviour {
     ThradPartternMasterSlaver taskMgr = new ThradPartternMasterSlaver();
@@ -39,11 +62,6 @@ public class TestThreadPatternMasterSlave : UnityEngine.MonoBehaviour {
     List<RenderSection> sections = new List<RenderSection>();
     Coroutine currentCour;
 
-    public enum ETaskPhase {
-        FirstAny,
-        SecondMain,
-        Invalid,
-    }
 
     public void Start() {
         Debug.LogError("Start");
@@ -53,7 +71,7 @@ public class TestThreadPatternMasterSlave : UnityEngine.MonoBehaviour {
     ThreadWorker CreateWorker(ThradPartternMasterSlaver _mgr, int _idx) {
         return new ThreadWorker(taskMgr);
     }
-
+    public int CurFrameMaxRunMs;
     public void Update() {
         DeltaTimeMs = (int)(Time.deltaTime * 1000);
         var _t = Time.realtimeSinceStartup;
@@ -63,6 +81,7 @@ public class TestThreadPatternMasterSlave : UnityEngine.MonoBehaviour {
         AnyThreadCount = taskMgr.GetAnyThreadTaskCount();
         MainThreadTaskCount = taskMgr.GetMainThreadTaskCount();
         CurFrameTaskCount = taskMgr.GetCurFrameTaskCount();
+        CurFrameMaxRunMs = taskMgr.CurFrameMaxRunMs;
     }
     public void OnDestroy() {
         if (isDestroyed) return;
@@ -86,12 +105,12 @@ public class TestThreadPatternMasterSlave : UnityEngine.MonoBehaviour {
         }
     }
     protected void DealTask(Task _task) {
-        var _taskPhase = (ETaskPhase)_task.currentParseIdx;
+        var _taskPhase = (ETestTaskPhase)_task.currentParseIdx;
         switch (_taskPhase) {
-            case ETaskPhase.FirstAny:
+            case ETestTaskPhase.FirstAny:
                 OnDealTaskPreparePart(_task);
                 break;
-            case ETaskPhase.SecondMain:
+            case ETestTaskPhase.SecondMain:
                 OnDealTaskCommitPart(_task);
                 break;
             default:
@@ -103,11 +122,13 @@ public class TestThreadPatternMasterSlave : UnityEngine.MonoBehaviour {
 
     //处理第一阶段任务 可能在任何线程
     protected void OnDealTaskPreparePart(Task _task) {
+        //Debug.Log("OnDealTaskPreparePart is InMainThread = " + taskMgr.IsInMainThread);
         WasteCPUTime(10);
     }
 
     //处理最后一阶段任务 在主线程
     protected void OnDealTaskCommitPart(Task _task) {
+        //Debug.Log("Doing OnDealTaskCommitPart is InMainThread = " + taskMgr.IsInMainThread);
         Debug.Assert(taskMgr.IsInMainThread, "Must in MainThread but is not" + _task.ToString());
         WasteCPUTime(1);
         if (parentTrans == null) {
@@ -150,6 +171,7 @@ public class TestThreadPatternMasterSlave : UnityEngine.MonoBehaviour {
         _section.currentTask = _task;
         _section.lastRebuildTicks = _task.createTicks;
         _task.OnFinishedEvent += (_tk) => {
+            //Debug.Log("FinishedCallBack is InMainThread = " + taskMgr.IsInMainThread);
             if (_tk.Exception != null) {
                 Debug.LogException(_tk.Exception);
                 return;
@@ -163,7 +185,7 @@ public class TestThreadPatternMasterSlave : UnityEngine.MonoBehaviour {
             if (!_tk.IsFinished) {
                 Debug.LogError("Logic Error:");
             }
-            System.Threading.Thread.Sleep(3);
+            System.Threading.Thread.Sleep(1);
         };
 
         _task.OnInterruptEvent += (_tk) => {

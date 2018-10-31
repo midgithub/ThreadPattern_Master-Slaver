@@ -30,16 +30,12 @@ namespace FM.Threading {
         public List<int> workedThreadIds = new System.Collections.Generic.List<int>();
 #endif
 
-        private bool isNormalFinished;//任务正常完成
         public bool IsFinished {
             get {
                 if (IsInterrupted || Exception != null) {
                     return true;
                 }
-                return isNormalFinished;
-            }
-            set {
-                isNormalFinished = value;
+                return currentParseIdx >= MaxPhaseNum;
             }
         }
         public volatile bool IsInterrupted;
@@ -54,11 +50,11 @@ namespace FM.Threading {
         /// 当前阶段任务在那种类型的线程中执行
         /// </summary>
         /// <returns></returns>
-        public virtual EThreadContext GetCurParseThradContextType() {
+        public virtual EThreadContext GetTargetQueueType() {
             if (IsMustRunInCurFrame) {
                 return EThreadContext.MainThreadAndInCurFrame;
             } else {
-                return HasNextPhase() ? EThreadContext.AnyThread : EThreadContext.MainThread;
+                return EThreadContext.MainThread;//除了第一阶段由任务本身决定价格外，其他的都是在主线程中
             }
         }
         /// <summary>
@@ -74,10 +70,9 @@ namespace FM.Threading {
             if (OnFinishedEvent != null) OnFinishedEvent(this);
         }
 
-        public bool HasNextPhase() { return currentParseIdx < MaxPhaseNum(); }
-        public bool MoveNextPhase() { return ++currentParseIdx < MaxPhaseNum(); }
+        public void MoveNextPhase() { ++currentParseIdx; }
 
-        protected virtual int MaxPhaseNum() { return 1; }
+        protected virtual int MaxPhaseNum { get { return 1; } }
         protected virtual int CompareFunc(Task _other) {
             return _other.currentParseIdx - currentParseIdx;
         }
